@@ -1,73 +1,121 @@
 package main
 
 import (
+	"strconv"
+	"time"
+
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
+	"github.com/patrickmn/go-cache"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-// 这个结构体使用gorm.Model作为它的基类，这个基类包含了创建时间、更新时间、删除时间等字段。
-// 同时，增加了Title和Description两个字段。这两个标签制定了在序列化的时候，需要命名为title和description。
 type Todo struct {
 	gorm.Model
 	Title       string `json:"title"`
 	Description string `json:"description"`
 }
 
-/*
-func LoggerMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		duration := time.Since(start)
-		log.Printf("%s %s %d %s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), duration)
-	}
+// JWT secret
+var jwtSecret = []byte("ewidmqwxuicewhfnewuixhrmrWEE2rwde")
+
+// JWT claims
+type Claims struct {
+	UserID uint `json:"user_id"`
+	jwt.StandardClaims
 }
 
-func AuthMiddleware() gin.HandlerFunc {
+// GenerateToken generates a JWT token for the given user ID
+func GenerateToken(userID uint) (string, error) {
+	claims := Claims{
+		UserID: userID,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(time.Hour * 24).Unix(),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtSecret)
+}
+
+// Middleware to check JWT token
+func JWTMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		apiKey := c.GetHeader("X-API-KEY")
-		if apiKey == "" {
-			c.AbortWithStatusJSON(401, gin.H{"error": "API key is missing"})
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(401, gin.H{"error": "Authorization header is missing"})
+			c.Abort()
 			return
 		}
+
+		claims := &Claims{}
+		token, err := jwt.ParseWithClaims(authHeader, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtSecret, nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(401, gin.H{"error": "Invalid token"})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", claims.UserID)
 		c.Next()
 	}
 }
 
-// UserController represents a user-related controller
-type UserController struct{}
-
-func (uc *UserController) GetUserInfo(c *gin.Context) {
-	name := c.Param("name")
-	c.String(200, "Hello, %s!", name)
-}
-*/
+// 这是缓存，表示缓存的有效期为5分钟，每10分钟更新一次缓存
+var memCache = cache.New(5*time.Minute, 10*time.Minute)
 
 func main() {
-	/**
-	* Routing or router in web development is a mechanism where HTTP requests are routed to the code that handles them.
-	* To put simply, in the Router you determine what should happen when a user visits a certain page.
-	* Here, we are using the Gin framework to create a router.
-	 */
 	router := gin.Default()
-	// Use attaches a global middleware to the router. i.e. the middleware attached through Use() will be
-	// included in the handlers chain for every single request. Even 404, 405, static files...
-	// router.Use(LoggerMiddleware())
 
-	// Connect to the SQLite database
 	db, err := gorm.Open(sqlite.Open("todo.db"), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
 
-	// Auto-migrate the Todo model to create the table
-	// 根据传入的结构体指针，自动创建或者更新表结构
 	db.AutoMigrate(&Todo{})
 
-	// Route to create a new Todo
-	// ShouldBindJson 把请求的body中的json数据绑定到结构体中。
-	router.POST("/todos", func(c *gin.Context) {
+	// Public routes
+	router.POST("/login", loginHandler)
+
+	// Protected routes
+	protected := router.Group("/")
+	protected.Use(JWTMiddleware())
+	{
+		protected.POST("/todos", createTodoHandler(db))
+		protected.GET("/todos", getTodosHandler(db))
+		protected.GET("/todos/:id", getTodoHandler(db))
+		protected.PUT("/todos/:id", updateTodoHandler(db))
+		protected.DELETE("/todos/:id", deleteTodoHandler(db))
+		protected.GET("/manytodos", getManyTodosHandler(db))
+		protected.POST("/manytodos", createManyTodosHandler(db))
+		protected.GET("/cached-todos", cachedTodosHandler(db))
+	}
+
+	router.Run(":8080")
+}
+
+func loginHandler(c *gin.Context) {
+	userID, err := strconv.Atoi(c.Query("userid"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid userid parameter"})
+		return
+	}
+
+	token, err := GenerateToken(uint(userID))
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to generate token"})
+		return
+	}
+
+	c.JSON(200, gin.H{"token": token})
+}
+
+func createTodoHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var todo Todo
 		if err := c.ShouldBindJSON(&todo); err != nil {
 			c.JSON(400, gin.H{"error": err.Error()})
@@ -75,20 +123,22 @@ func main() {
 		}
 		db.Create(&todo)
 		c.JSON(200, todo)
-	})
+	}
+}
 
-	router.GET("/todos", func(c *gin.Context) {
+func getTodosHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var todos []Todo
 		db.Find(&todos)
 		c.JSON(200, todos)
-	})
+	}
+}
 
-	// Route to get a specific Todo by ID
-	router.GET("/todos/:id", func(c *gin.Context) {
+func getTodoHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var todo Todo
 		todoID := c.Param("id")
 
-		// Retrieve the Todo from the database
 		result := db.First(&todo, todoID)
 		if result.Error != nil {
 			c.JSON(404, gin.H{"error": "Todo not found"})
@@ -96,9 +146,11 @@ func main() {
 		}
 
 		c.JSON(200, todo)
-	})
+	}
+}
 
-	router.PUT("/todos/:id", func(c *gin.Context) {
+func updateTodoHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var todo Todo
 		todoID := c.Param("id")
 
@@ -118,9 +170,11 @@ func main() {
 		todo.Description = updatedTodo.Description
 		db.Save(&todo)
 		c.JSON(200, todo)
-	})
+	}
+}
 
-	router.DELETE("/todos/:id", func(c *gin.Context) {
+func deleteTodoHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var todo Todo
 		todoID := c.Param("id")
 
@@ -132,56 +186,65 @@ func main() {
 
 		db.Delete(&todo)
 		c.JSON(200, gin.H{"message": "Todo deleted successfully"})
-	})
+	}
+}
 
-	/*
-		// Define a route for the root URL
-		// Context is a container for request data.
-		router.GET("/", func(c *gin.Context) {
-			// c.String returns a string with a status code of 200
-			c.String(200, "Hello, World!")
-		})
-
-		// Define a route for goodbye
-		router.GET("/goodbye", func(c *gin.Context) {
-			c.String(200, "Goodbye!")
-		})
-
-		// Define a user controller
-		userController := UserController{}
-		// Route with a URL parameter
-		router.GET("/hello/:name", userController.GetUserInfo)
-
-		// Route with query parameters
-		router.GET("/search", func(c *gin.Context) {
-			query := c.DefaultQuery("q", "golang")
-			c.String(200, "Search query: %s", query)
-		})
-
-		// Public routes (no authentication required)
-		public := router.Group("/public")
-		{
-			public.GET("/info", func(c *gin.Context) {
-				c.String(200, "Public information")
-			})
-			public.GET("/products", func(c *gin.Context) {
-				c.String(200, "Public product list")
-			})
+func getManyTodosHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		count, err := strconv.Atoi(c.DefaultQuery("count", "5"))
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid count parameter"})
+			return
+		}
+		offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid offset parameter"})
+			return
 		}
 
-		// Private routes (require authentication)
-		private := router.Group("/private")
-		private.Use(AuthMiddleware())
-		{
-			private.GET("/data", func(c *gin.Context) {
-				c.String(200, "Private data accessible after authentication")
-			})
-			private.POST("/create", func(c *gin.Context) {
-				c.String(200, "Create a new resource")
-			})
-		}
-	*/
+		var todos []Todo
+		db.Limit(count).Offset(offset).Find(&todos)
+		c.JSON(200, todos)
+	}
+}
 
-	// Run the server on port 8080
-	router.Run(":8080")
+func createManyTodosHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var todos []Todo
+		if err := c.ShouldBindJSON(&todos); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		err := db.Transaction(func(tx *gorm.DB) error {
+			for _, todo := range todos {
+				if err := tx.Create(&todo).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+
+		if err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, todos)
+	}
+}
+
+func cachedTodosHandler(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if cached, found := memCache.Get("todos"); found {
+			c.JSON(200, cached)
+			return
+		}
+
+		var todos []Todo
+		db.Find(&todos)
+
+		memCache.Set("todos", todos, cache.DefaultExpiration)
+		c.JSON(200, todos)
+	}
 }
