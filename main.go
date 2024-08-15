@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// 嵌入式结构体，可以被视为一种继承。表示数据库里面的一条数据。下面的Claims也是类似的。
 type Todo struct {
 	gorm.Model
 	Title       string `json:"title"`
@@ -21,6 +22,7 @@ type Todo struct {
 var jwtSecret = []byte("ewidmqwxuicewhfnewuixhrmrWEE2rwde")
 
 // JWT claims
+// 什么是Claims？Claims是JWT的载体，包含了JWT的各种信息，比如用户ID、过期时间等。
 type Claims struct {
 	UserID uint `json:"user_id"`
 	jwt.StandardClaims
@@ -28,6 +30,7 @@ type Claims struct {
 
 // GenerateToken generates a JWT token for the given user ID
 func GenerateToken(userID uint) (string, error) {
+	// 先用给定的信息生成一个Claims对象
 	claims := Claims{
 		UserID: userID,
 		StandardClaims: jwt.StandardClaims{
@@ -35,7 +38,9 @@ func GenerateToken(userID uint) (string, error) {
 		},
 	}
 
+	// 用Claims对象生成一个JWT token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// 这个token再经过签名，生成最终的JWT字符串
 	return token.SignedString(jwtSecret)
 }
 
@@ -45,10 +50,12 @@ func JWTMiddleware() gin.HandlerFunc {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
 			c.JSON(401, gin.H{"error": "Authorization header is missing"})
+			// 出于安全考虑立即终止请求。如果直接return，后续的代码还会继续执行，可能导致一些未知的错误。
 			c.Abort()
 			return
 		}
 
+		// 解析JWT token， authHeader是JWT字符串，就是之前用户获得的token，然后用jwtSecret作为密钥，解析出Claims对象。
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(authHeader, claims, func(token *jwt.Token) (interface{}, error) {
 			return jwtSecret, nil
@@ -61,6 +68,7 @@ func JWTMiddleware() gin.HandlerFunc {
 		}
 
 		c.Set("user_id", claims.UserID)
+		// 继续处理请求
 		c.Next()
 	}
 }
